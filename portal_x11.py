@@ -94,7 +94,10 @@ class Session(dbus.service.Object):
             # antes de seguir, para que un Start() inmediato despues no
             # se tope con un ID reciclado a medio propagar (causaba
             # "invalid global" / "target not found" en el cliente).
-            self.pipeline.get_state(2 * Gst.SECOND)
+            # Recortado a 0.8s (de 2s): el cliente suele reintentar en
+            # <1s cuando esto pasa por su propia inestabilidad de red,
+            # y queremos poder atenderlo lo antes posible.
+            self.pipeline.get_state(int(0.8 * Gst.SECOND))
             self.pipeline = None
         self.service.sessions.pop(self.session_handle, None)
         log(f"sesion cerrada: {self.session_handle}")
