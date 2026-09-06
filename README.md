@@ -21,17 +21,41 @@ receive back from `Start()`.
 
 ## What it does and doesn't do
 
-- Captures the whole X11 screen (single monitor / no window picker) as
-  `Video/Source` over PipeWire, with the pointer drawn in.
-- No permission dialog: every `CreateSession`/`Start` request is
-  auto-approved. This is meant for a single-user personal machine, not a
-  multi-user or sandboxed (Flatpak) setup.
+- Can capture either the whole X11 screen or one specific window (like
+  Discord's "Entire Screen / Application Window" chooser), as `Video/Source`
+  over PipeWire, with the pointer drawn in.
+  - **The choice has to be made ahead of time**, with:
+    ```sh
+    python3 portal_x11.py --choose-source
+    ```
+    This pops a `zenity --list` dialog and remembers your choice (in
+    `~/.config/xdg-desktop-portal-x11/source.json`) for the *next* `Start()`
+    call. It does **not** ask again inside `Start()` itself, on purpose:
+    real-time protocols like Wi-Fi Display/Miracast have their own timeout
+    for setting up the connection with the receiving TV, and waiting on a
+    human to click through a dialog in the middle of that handshake reliably
+    blows through it (the TV gives up and disconnects). Run the command
+    above, pick a window (or "Pantalla completa"), *then* hit connect in
+    your casting app. If you never run it, or the previously-chosen window
+    has since been closed, it falls back to capturing the whole screen -
+    the original always-on behavior.
+  - Window capture uses `ximagesrc`'s `xid` property (XComposite), so it
+    keeps updating even if the window is covered by others - but if you
+    *minimize* it, the feed will typically freeze/blank, since an unmapped
+    window stops compositing. Keep it covered, not minimized. Requires
+    xfwm4's compositor to be on (Window Manager Tweaks -> Compositor) for
+    covered (non-topmost) windows to capture correctly.
+  - Requires `wmctrl` and `zenity` for `--choose-source`; not needed at all
+    for plain whole-screen capture.
+- No permission dialog: every `CreateSession`/`SelectSources`/`Start`
+  request is auto-approved instantly - this is meant for a single-user
+  personal machine, not a multi-user or sandboxed (Flatpak) setup.
 - Recovers from an internal pipeline failure by tearing the session down and
   emitting the standard `Session.Closed` signal, so well-behaved clients
   (GNOME Network Displays included) request a fresh session instead of
   retrying against a dead stream forever.
-- Does not implement window/region selection, multiple simultaneous
-  sources, or audio capture (that's a separate portal interface).
+- Does not implement region selection, multiple simultaneous sources, or
+  audio capture (that's a separate portal interface).
 
 ## Install
 
@@ -46,7 +70,9 @@ files. It registers the backend for whatever desktop is in
 `$XDG_CURRENT_DESKTOP` at install time (defaults to XFCE if unset).
 
 Requires: `python3-dbus`, `python3-gi` (PyGObject), GStreamer with
-`ximagesrc` (`gstreamer1.0-plugins-good`) and `gstreamer1.0-pipewire`.
+`ximagesrc` (`gstreamer1.0-plugins-good`) and `gstreamer1.0-pipewire`, plus
+`wmctrl` and `zenity` for the screen/window picker (optional - falls back to
+whole-screen capture without them).
 
 ## Uninstall
 

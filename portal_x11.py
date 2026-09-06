@@ -4,11 +4,15 @@ Backend de xdg-desktop-portal para org.freedesktop.impl.portal.ScreenCast
 usando captura X11 (ximagesrc) + PipeWire, para escritorios sin Mutter/KWin
 (XFCE, i3, etc).
 
-PROTOTIPO: sin dialogo de permisos (auto-aprueba toda solicitud), solo
-soporta capturar el escritorio completo (MONITOR), sin seleccion de
-multiples fuentes. Pensado para uso personal en una sola maquina.
+PROTOTIPO: sin dialogo de permisos (auto-aprueba toda solicitud). Soporta
+elegir entre pantalla completa o una ventana especifica, pero esa eleccion
+se hace de antemano (`--choose-source`), no durante Start(): ver
+prompt_source_choice() para el porque. Pensado para uso personal en una
+sola maquina.
 """
 import json
+import os
+import sys
 import secrets
 import subprocess
 import time
@@ -31,11 +35,108 @@ SESSION_IFACE = "org.freedesktop.impl.portal.Session"
 PROPS_IFACE = "org.freedesktop.DBus.Properties"
 
 SOURCE_TYPE_MONITOR = 1
+SOURCE_TYPE_WINDOW = 2
 CURSOR_MODE_EMBEDDED = 2
+
+STATE_DIR = os.path.expanduser("~/.config/xdg-desktop-portal-x11")
+STATE_FILE = os.path.join(STATE_DIR, "source.json")
 
 
 def log(msg):
     print(f"[x11-portal] {msg}", flush=True)
+
+
+def list_windows():
+    """Ventanas normales (no paneles/escritorio) como [(xid_hex, titulo)]."""
+    try:
+        out = subprocess.check_output(["wmctrl", "-l"], text=True)
+    except Exception:
+        return []
+
+    windows = []
+    for line in out.splitlines():
+        parts = line.split(None, 3)
+        if len(parts) < 4:
+            continue
+        wid_hex, desktop, _host, title = parts
+        if desktop == "-1":
+            # Paneles, escritorio y demas ventanas "pegajosas" sin
+            # relacion con lo que el usuario querria compartir.
+            continue
+        title = title.strip()
+        if not title:
+            continue
+        windows.append((wid_hex, title))
+    return windows
+
+
+def prompt_source_choice():
+    """Selector estilo Discord: 'Pantalla completa' o una ventana especifica.
+
+    Muestra el dialogo (bloqueante) y GUARDA la eleccion en STATE_FILE, para
+    que Start() la pueda leer despues al instante sin volver a preguntar.
+    Pensado para correrse a mano ANTES de darle a "conectar" en la app de
+    casting: el handshake RTSP con la TV tiene su propio limite de tiempo, y
+    esperar a que el usuario elija en un dialogo durante el propio Start()
+    lo hace vencer (visto en la practica: la Roku se desconecta si el
+    dialogo tarda mas de unos pocos segundos en cerrarse).
+    """
+    windows = list_windows()
+
+    rows = ["SCREEN", "Pantalla completa"]
+    for wid_hex, title in windows:
+        rows += [wid_hex, title]
+
+    try:
+        result = subprocess.run(
+            ["zenity", "--list",
+             "--title=Compartir en Roku",
+             "--text=Que quieres transmitir la proxima vez que conectes?",
+             "--width=420", "--height=320",
+             "--column=id", "--column=Ventana",
+             "--hide-column=1", "--print-column=1"] + rows,
+            capture_output=True, text=True, timeout=120,
+        )
+    except Exception as e:
+        log(f"selector de ventana fallo: {e}")
+        return
+
+    choice = result.stdout.strip()
+    if result.returncode != 0 or not choice:
+        return  # cancelado, no tocar la eleccion guardada
+
+    xid = None
+    if choice != "SCREEN":
+        try:
+            xid = int(choice, 16)
+        except ValueError:
+            xid = None
+
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(STATE_FILE, "w") as f:
+        json.dump({"xid": xid}, f)
+    log(f"eleccion guardada: xid={xid!r}")
+
+
+def load_source_choice():
+    """Lectura instantanea (sin dialogo) de la eleccion guardada por
+    prompt_source_choice(). Devuelve None (pantalla completa) si no hay
+    eleccion guardada, o si la ventana elegida ya no existe."""
+    try:
+        with open(STATE_FILE) as f:
+            data = json.load(f)
+    except Exception:
+        return None
+
+    xid = data.get("xid")
+    if xid is None:
+        return None
+
+    xid_hex = f"0x{xid:08x}"
+    if not any(wid_hex.lower() == xid_hex.lower() for wid_hex, _title in list_windows()):
+        log(f"la ventana elegida ({xid_hex}) ya no existe, usando pantalla completa")
+        return None
+    return xid
 
 
 def find_pw_node(node_name, timeout=3.0):
@@ -152,7 +253,7 @@ class ScreenCastService(dbus.service.Object):
             return dbus.Dictionary({}, signature="sv")
         return dbus.Dictionary(
             {
-                "AvailableSourceTypes": dbus.UInt32(SOURCE_TYPE_MONITOR),
+                "AvailableSourceTypes": dbus.UInt32(SOURCE_TYPE_MONITOR | SOURCE_TYPE_WINDOW),
                 "AvailableCursorModes": dbus.UInt32(CURSOR_MODE_EMBEDDED),
                 "version": dbus.UInt32(4),
             },
@@ -177,8 +278,9 @@ class ScreenCastService(dbus.service.Object):
         if session_handle not in self.sessions:
             log("SelectSources: sesion desconocida")
             return (2, dbus.Dictionary({}, signature="sv"))
-        # MVP: siempre se captura el escritorio completo, se ignoran
-        # 'types'/'multiple'/'cursor_mode' del caller.
+        # 'types'/'multiple'/'cursor_mode' del caller se ignoran: la
+        # eleccion real (pantalla completa vs. ventana) se hace en Start()
+        # con nuestro propio selector (ver pick_source()), no aqui.
         return (0, dbus.Dictionary({}, signature="sv"))
 
     @dbus.service.method(
@@ -191,9 +293,16 @@ class ScreenCastService(dbus.service.Object):
             log("Start: sesion desconocida")
             return (2, dbus.Dictionary({}, signature="sv"))
 
+        xid = load_source_choice()
+        if xid is not None:
+            log(f"capturando ventana especifica: xid={xid:#x}")
+            source_elem = f"ximagesrc xid={xid} use-damage=0 show-pointer=1 ! "
+        else:
+            source_elem = "ximagesrc use-damage=0 show-pointer=1 ! "
+
         node_name = "x11-portal-" + secrets.token_hex(4)
         pipeline_desc = (
-            "ximagesrc use-damage=0 show-pointer=1 ! "
+            source_elem +
             "video/x-raw,framerate=30/1 ! videoconvert ! "
             # leaky=downstream + max-size-buffers=1: nunca dejar que se
             # acumulen frames viejos con referencias colgadas, que era lo
@@ -239,7 +348,9 @@ class ScreenCastService(dbus.service.Object):
 
         stream_props = {
             "position": (dbus.Int32(0), dbus.Int32(0)),
-            "source_type": dbus.UInt32(SOURCE_TYPE_MONITOR),
+            "source_type": dbus.UInt32(
+                SOURCE_TYPE_WINDOW if xid is not None else SOURCE_TYPE_MONITOR
+            ),
         }
         if serial is not None:
             stream_props["pipewire-serial"] = dbus.UInt64(int(serial))
@@ -261,4 +372,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] == "--choose-source":
+        # No toca D-Bus ni GStreamer: solo actualiza STATE_FILE para que el
+        # servicio (corriendo aparte, activado por D-Bus) lo lea en el
+        # siguiente Start().
+        prompt_source_choice()
+    else:
+        main()
