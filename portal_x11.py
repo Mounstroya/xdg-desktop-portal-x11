@@ -200,6 +200,8 @@ class ScreenCastService(dbus.service.Object):
             # que disparaba "gst_buffer_remove_memory_range: assertion
             # gst_buffer_is_writable failed" dentro de pipewiresink y
             # tumbaba el pipeline sin que nadie mas se enterara.
+            # (Se probo max-size-buffers=3 para el cursor desaparecido en
+            # movimiento, pero causo mas caidas de conexion; revertido.)
             "queue max-size-buffers=1 leaky=downstream ! "
             f"pipewiresink client-name={node_name} mode=provide use-bufferpool=false "
             f'stream-properties="props,media.class=(string)Video/Source,'
