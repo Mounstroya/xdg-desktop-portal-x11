@@ -76,6 +76,6 @@ Written while trying to get Wi-Fi Display (Miracast) casting working from
 XFCE via [GNOME Network Displays](https://gitlab.gnome.org/GNOME/gnome-network-displays),
 which - like most portal-aware screen-casting apps - has no fallback for
 desktops without a real portal backend. See
-[gnome-network-displays-fixes](../gnome-network-displays-fixes) for the
-patches that came out of getting the actual casting session working
-end-to-end once this portal was in place.
+[this fork's `xfce-roku-audio-fixes` branch](https://github.com/Mounstroya/gnome-network-displays/tree/xfce-roku-audio-fixes)
+for the patches that came out of getting the actual casting session working
+end-to-end (audio included) once this portal was in place.
